@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.collections import PatchCollection
 from matplotlib.animation import FuncAnimation
 
 # ── Bit constants ─────────────────────────────────────────────────────────────
@@ -130,13 +131,19 @@ def draw_frame(ax, root: Node, max_depth: int, colored: bool = True) -> None:
     ax.set_facecolor("#111111")
     ax.add_patch(Rectangle((root.x, root.y), root.size, root.size,
                             fill=False, linewidth=0.6, edgecolor="#333333"))
+    
+    rects = []
+    colors = []
     for (x, y, s, d, m) in expand_active(root, max_depth):
+        rects.append(Rectangle((x, y), s, s))
         if colored:
-            fc = _cell_color(m, d, max_depth)
+            colors.append(_cell_color(m, d, max_depth))
         else:
             shade = 0.15 + 0.75 * (1.0 - d / max_depth if max_depth > 0 else 0.0)
-            fc = (shade, shade, shade)
-        ax.add_patch(Rectangle((x, y), s, s, facecolor=fc, linewidth=0))
+            colors.append((shade, shade, shade))
+    
+    if rects:
+        ax.add_collection(PatchCollection(rects, facecolors=colors, linewidth=0))
 
 # ── Basic demos ───────────────────────────────────────────────────────────────
 def run_static_demo(root_mask: int = 0b1111, max_depth: int = 6) -> None:
@@ -200,16 +207,6 @@ def run_lab_demo(max_depth: int = 6, ticks_per_second: float = 3.0) -> None:
 # GRAMMAR LAYER
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Step context ──────────────────────────────────────────────────────────────
-# Populated by Program.step_node before each condition evaluation.
-# Carries "tick", optional neighbor masks "nb_N/S/E/W", neighbor program names
-# "nb_prog_N/S/E/W", and "own_prog" (cell's current program name).
-_step_ctx: dict = {}
-
-# Set by SwitchProgram / SwitchToPluralityNeighbor during a step; Grid.step()
-# reads this after each cell completes and hot-swaps the cell's program.
-_pending_program_switch: list = [None]   # [prog_name | None]
-
 # ── Family lookup ─────────────────────────────────────────────────────────────
 _FAMILY_SETS = {
     "Y_LOOP":    set(Y_LOOP),
@@ -238,8 +235,8 @@ def family_of(mask: int) -> str:
 
 class Cond:
     """Base condition — always True."""
-    def _test(self, *_) -> bool: return True
-    def evaluate(self, node: "Node", tick: int) -> bool: return self._test(node, tick)
+    def _test(self, node: "Node", tick: int, ctx: dict) -> bool: return True
+    def evaluate(self, node: "Node", tick: int, ctx: dict) -> bool: return self._test(node, tick, ctx)
     def AND(self, other: "Cond") -> "Cond":  return _AndCond(self, other)
     def OR(self,  other: "Cond") -> "Cond":  return _OrCond(self, other)
     def BUT(self, other: "Cond") -> "Cond":  return _AndCond(self, _NotCond(other))
@@ -249,17 +246,17 @@ class Cond:
 
 class _AndCond(Cond):
     def __init__(self, a, b): self._a, self._b = a, b
-    def _test(self, n, t): return self._a.evaluate(n, t) and self._b.evaluate(n, t)
+    def _test(self, n, t, c): return self._a.evaluate(n, t, c) and self._b.evaluate(n, t, c)
     def __repr__(self): return f"({self._a} AND {self._b})"
 
 class _OrCond(Cond):
     def __init__(self, a, b): self._a, self._b = a, b
-    def _test(self, n, t): return self._a.evaluate(n, t) or self._b.evaluate(n, t)
+    def _test(self, n, t, c): return self._a.evaluate(n, t, c) or self._b.evaluate(n, t, c)
     def __repr__(self): return f"({self._a} OR {self._b})"
 
 class _NotCond(Cond):
     def __init__(self, c): self._c = c
-    def _test(self, n, t): return not self._c.evaluate(n, t)
+    def _test(self, n, t, c): return not self._c.evaluate(n, t, c)
     def __repr__(self): return f"NOT({self._c})"
 
 # ── Node / tick conditions ────────────────────────────────────────────────────
@@ -267,55 +264,55 @@ class _NotCond(Cond):
 def IF_family(name: str) -> Cond:
     """True when node's mask is in the named loop family."""
     class _C(Cond):
-        def _test(self, n, *_): return family_of(n.mask) == name
+        def _test(self, n, *args): return family_of(n.mask) == name
         def __repr__(self): return f"family=={name}"
     return _C()
 
 def IF_mask(value: int) -> Cond:
     """True when node.mask == value exactly."""
     class _C(Cond):
-        def _test(self, n, *_): return n.mask == value
+        def _test(self, n, *args): return n.mask == value
         def __repr__(self): return f"mask=={value:04b}"
     return _C()
 
 def IF_tick_gte(n: int) -> Cond:
     """True when tick >= n."""
     class _C(Cond):
-        def _test(self, _, tick): return tick >= n
+        def _test(self, _, tick, *args): return tick >= n
         def __repr__(self): return f"tick>={n}"
     return _C()
 
 def IF_tick_mod(period: int, remainder: int = 0) -> Cond:
     """True when tick % period == remainder."""
     class _C(Cond):
-        def _test(self, _, tick): return tick % period == remainder
+        def _test(self, _, tick, *args): return tick % period == remainder
         def __repr__(self): return f"tick%{period}=={remainder}"
     return _C()
 
 def IF_depth_gte(n: int) -> Cond:
     """True when node.depth >= n."""
     class _C(Cond):
-        def _test(self, node, *_): return node.depth >= n
+        def _test(self, node, *args): return node.depth >= n
         def __repr__(self): return f"depth>={n}"
     return _C()
 
 def IF_active_count(n: int) -> Cond:
     """True when exactly n quadrants are active."""
     class _C(Cond):
-        def _test(self, node, *_): return bin(node.mask).count("1") == n
+        def _test(self, node, *args): return bin(node.mask).count("1") == n
         def __repr__(self): return f"active=={n}"
     return _C()
 
-ALWAYS = Cond()   # always-true; use as a catch-all rule
+ALWAYS = Cond()
 
-# ── Neighbor conditions (populated via _step_ctx by Grid.step) ────────────────
+# ── Neighbor conditions (populated via ctx by Grid.step) ────────────────
 
 def IF_neighbor_family(direction: str, name: str) -> Cond:
     """True when the cardinal neighbor in direction (N/S/E/W) is in the named family."""
     key = f"nb_{direction}"
     class _C(Cond):
-        def _test(self, *_):
-            nb = _step_ctx.get(key)
+        def _test(self, n, t, ctx):
+            nb = ctx.get(key)
             return nb is not None and family_of(nb) == name
         def __repr__(self): return f"nb_{direction}=={name}"
     return _C()
@@ -324,37 +321,70 @@ def IF_neighbor_mask(direction: str, value: int) -> Cond:
     """True when the cardinal neighbor in direction has exactly this mask."""
     key = f"nb_{direction}"
     class _C(Cond):
-        def _test(self, *_): return _step_ctx.get(key) == value
+        def _test(self, n, t, ctx): return ctx.get(key) == value
         def __repr__(self): return f"nb_{direction}.mask=={value:04b}"
     return _C()
 
 def IF_neighbor_count(name: str, count: int) -> Cond:
     """True when exactly `count` of the 4 cardinal neighbors are in the named family."""
     class _C(Cond):
-        def _test(self, *_):
-            n = sum(1 for d in ("N","S","E","W")
-                    if _step_ctx.get(f"nb_{d}") is not None
-                    and family_of(_step_ctx[f"nb_{d}"]) == name)
-            return n == count
+        def _test(self, node, tick, ctx):
+            neighbor_count = sum(1 for d in ("N","S","E","W")
+                    if ctx.get(f"nb_{d}") is not None
+                    and family_of(ctx[f"nb_{d}"]) == name)
+            return neighbor_count == count
         def __repr__(self): return f"nb_count({name})=={count}"
+    return _C()
+
+def IF_neighbor_count8(name: str, count: int) -> Cond:
+    """True when exactly `count` of the 8 neighbors (including diagonals) are in the named family."""
+    class _C(Cond):
+        def _test(self, node, tick, ctx):
+            neighbor_count = sum(1 for d in ("N","S","E","W","NE","NW","SE","SW")
+                    if ctx.get(f"nb_{d}") is not None
+                    and family_of(ctx[f"nb_{d}"]) == name)
+            return neighbor_count == count
+        def __repr__(self): return f"nb_count8({name})=={count}"
+    return _C()
+
+def IF_neighbor_mask_count(mask_value: int, count: int) -> Cond:
+    """True when exactly `count` of the 4 cardinal neighbors have the specific mask value."""
+    class _C(Cond):
+        def _test(self, node, tick, ctx):
+            neighbor_count = sum(1 for d in ("N","S","E","W")
+                    if ctx.get(f"nb_{d}") is not None
+                    and ctx[f"nb_{d}"] == mask_value)
+            return neighbor_count == count
+        def __repr__(self): return f"nb_mask_count({mask_value:04b})=={count}"
+    return _C()
+
+def IF_neighbor_mask_count8(mask_value: int, count: int) -> Cond:
+    """True when exactly `count` of the 8 neighbors (including diagonals) have the specific mask value."""
+    class _C(Cond):
+        def _test(self, node, tick, ctx):
+            neighbor_count = sum(1 for d in ("N","S","E","W","NE","NW","SE","SW")
+                    if ctx.get(f"nb_{d}") is not None
+                    and ctx[f"nb_{d}"] == mask_value)
+            return neighbor_count == count
+        def __repr__(self): return f"nb_mask_count8({mask_value:04b})=={count}"
     return _C()
 
 def IF_any_neighbor(name: str) -> Cond:
     """True when at least one cardinal neighbor is in the named family."""
     class _C(Cond):
-        def _test(self, *_):
-            return any(_step_ctx.get(f"nb_{d}") is not None
-                       and family_of(_step_ctx[f"nb_{d}"]) == name
+        def _test(self, n, t, ctx):
+            return any(ctx.get(f"nb_{d}") is not None
+                       and family_of(ctx[f"nb_{d}"]) == name
                        for d in ("N","S","E","W"))
         def __repr__(self): return f"any_nb=={name}"
     return _C()
 
-# ── Program-identity conditions (populated via _step_ctx by Grid.step) ────────
+# ── Program-identity conditions (populated via ctx by Grid.step) ────────
 
 def IF_own_prog(name: str) -> Cond:
     """True when this cell's own program name matches."""
     class _C(Cond):
-        def _test(self, *_): return _step_ctx.get("own_prog") == name
+        def _test(self, n, t, ctx): return ctx.get("own_prog") == name
         def __repr__(self): return f"own_prog=={name}"
     return _C()
 
@@ -362,15 +392,15 @@ def IF_neighbor_prog(direction: str, name: str) -> Cond:
     """True when the cardinal neighbor in direction (N/S/E/W) runs the named program."""
     key = f"nb_prog_{direction}"
     class _C(Cond):
-        def _test(self, *_): return _step_ctx.get(key) == name
+        def _test(self, n, t, ctx): return ctx.get(key) == name
         def __repr__(self): return f"nb_prog_{direction}=={name}"
     return _C()
 
 def IF_any_neighbor_prog(name: str) -> Cond:
     """True when at least one cardinal neighbor runs the named program."""
     class _C(Cond):
-        def _test(self, *_):
-            return any(_step_ctx.get(f"nb_prog_{d}") == name
+        def _test(self, n, t, ctx):
+            return any(ctx.get(f"nb_prog_{d}") == name
                        for d in ("N","S","E","W"))
         def __repr__(self): return f"any_nb_prog=={name}"
     return _C()
@@ -378,18 +408,18 @@ def IF_any_neighbor_prog(name: str) -> Cond:
 def IF_neighbor_prog_count(name: str, count: int) -> Cond:
     """True when exactly `count` cardinal neighbors run the named program."""
     class _C(Cond):
-        def _test(self, *_):
+        def _test(self, n, t, ctx):
             return sum(1 for d in ("N","S","E","W")
-                       if _step_ctx.get(f"nb_prog_{d}") == name) == count
+                       if ctx.get(f"nb_prog_{d}") == name) == count
         def __repr__(self): return f"nb_prog_count({name})=={count}"
     return _C()
 
-def IF_neighbor_prog_gte(name: str, n: int) -> Cond:
-    """True when at least `n` cardinal neighbors run the named program."""
+def IF_neighbor_prog_gte(name: str, threshold: int) -> Cond:
+    """True when at least `threshold` cardinal neighbors run the named program."""
     class _C(Cond):
-        def _test(self, *_):
+        def _test(self, node, t, ctx):
             return sum(1 for d in ("N","S","E","W")
-                       if _step_ctx.get(f"nb_prog_{d}") == name) >= n
+                       if ctx.get(f"nb_prog_{d}") == name) >= threshold
         def __repr__(self): return f"nb_prog_gte({name},{n})"
     return _C()
 
@@ -398,35 +428,35 @@ def IF_neighbor_prog_gte(name: str, n: int) -> Cond:
 def IF_tick_lt(n: int) -> Cond:
     """True when tick < n."""
     class _C(Cond):
-        def _test(self, _, tick): return tick < n
+        def _test(self, _, tick, *args): return tick < n
         def __repr__(self): return f"tick<{n}"
     return _C()
 
 def IF_depth_eq(n: int) -> Cond:
     """True when node.depth == n exactly."""
     class _C(Cond):
-        def _test(self, node, *_): return node.depth == n
+        def _test(self, node, *args): return node.depth == n
         def __repr__(self): return f"depth=={n}"
     return _C()
 
 def IF_depth_lt(n: int) -> Cond:
     """True when node.depth < n."""
     class _C(Cond):
-        def _test(self, node, *_): return node.depth < n
+        def _test(self, node, *args): return node.depth < n
         def __repr__(self): return f"depth<{n}"
     return _C()
 
 def IF_active_gte(n: int) -> Cond:
     """True when active quadrant count >= n."""
     class _C(Cond):
-        def _test(self, node, *_): return bin(node.mask).count("1") >= n
+        def _test(self, node, *args): return bin(node.mask).count("1") >= n
         def __repr__(self): return f"active>={n}"
     return _C()
 
 def IF_active_lte(n: int) -> Cond:
     """True when active quadrant count <= n."""
     class _C(Cond):
-        def _test(self, node, *_): return bin(node.mask).count("1") <= n
+        def _test(self, node, *args): return bin(node.mask).count("1") <= n
         def __repr__(self): return f"active<={n}"
     return _C()
 
@@ -434,7 +464,7 @@ def IF_mask_in(values: List[int]) -> Cond:
     """True when node.mask is in the given set of values."""
     s = set(values)
     class _C(Cond):
-        def _test(self, node, *_): return node.mask in s
+        def _test(self, node, *args): return node.mask in s
         def __repr__(self): return f"mask_in({','.join(f'{v:04b}' for v in values)})"
     return _C()
 
@@ -442,53 +472,53 @@ def IF_random_lt(prob: float) -> Cond:
     """True with probability `prob` (0.0-1.0) each evaluation."""
     import random as _rand
     class _C(Cond):
-        def _test(self, *_): return _rand.random() < prob
+        def _test(self, *args): return _rand.random() < prob
         def __repr__(self): return f"random<{prob}"
     return _C()
 
 def IF_tick_between(lo: int, hi: int) -> Cond:
     """True when lo <= tick <= hi (inclusive range)."""
     class _C(Cond):
-        def _test(self, _, tick): return lo <= tick <= hi
+        def _test(self, _, tick, *args): return lo <= tick <= hi
         def __repr__(self): return f"tick_in({lo}..{hi})"
     return _C()
 
 def IF_depth_between(lo: int, hi: int) -> Cond:
     """True when lo <= node.depth <= hi (inclusive range)."""
     class _C(Cond):
-        def _test(self, node, *_): return lo <= node.depth <= hi
+        def _test(self, node, *args): return lo <= node.depth <= hi
         def __repr__(self): return f"depth_in({lo}..{hi})"
     return _C()
 
-def IF_var_gte(name: str, n: int) -> Cond:
-    """True when cell variable `name` >= n (from _step_ctx)."""
+def IF_var_gte(name: str, value: int) -> Cond:
+    """True when cell variable `name` >= value (from ctx)."""
     class _C(Cond):
-        def _test(self, *_):
-            return _step_ctx.get(f"var_{name}", 0) >= n
-        def __repr__(self): return f"var_{name}>={n}"
+        def _test(self, node, tick, ctx):
+            return ctx["vars"].get(name, 0) >= value
+        def __repr__(self): return f"var_{name}>={value}"
     return _C()
 
-def IF_var_eq(name: str, n: int) -> Cond:
-    """True when cell variable `name` == n (from _step_ctx)."""
+def IF_var_eq(name: str, value: int) -> Cond:
+    """True when cell variable `name` == value (from ctx)."""
     class _C(Cond):
-        def _test(self, *_):
-            return _step_ctx.get(f"var_{name}", 0) == n
-        def __repr__(self): return f"var_{name}=={n}"
+        def _test(self, node, tick, ctx):
+            return ctx["vars"].get(name, 0) == value
+        def __repr__(self): return f"var_{name}=={value}"
     return _C()
 
-def IF_var_lt(name: str, n: int) -> Cond:
-    """True when cell variable `name` < n (from _step_ctx)."""
+def IF_var_lt(name: str, value: int) -> Cond:
+    """True when cell variable `name` < value (from ctx)."""
     class _C(Cond):
-        def _test(self, *_):
-            return _step_ctx.get(f"var_{name}", 0) < n
-        def __repr__(self): return f"var_{name}<{n}"
+        def _test(self, node, tick, ctx):
+            return ctx["vars"].get(name, 0) < value
+        def __repr__(self): return f"var_{name}<{value}"
     return _C()
 
 def IF_signal(name: str) -> Cond:
     """True when the named signal was received this tick."""
     class _C(Cond):
-        def _test(self, *_):
-            signals = _step_ctx.get("signals", set())
+        def _test(self, n, t, ctx):
+            signals = ctx.get("signals", set())  # Read-only input signals
             return name in signals
         def __repr__(self): return f"signal={name}"
     return _C()
@@ -496,35 +526,35 @@ def IF_signal(name: str) -> Cond:
 def IF_neighbor_count_gte(family_name: str, n: int) -> Cond:
     """True when at least n cardinal neighbors are in the named family."""
     class _C(Cond):
-        def _test(self, *_):
+        def _test(self, n, t, ctx):
             return sum(1 for d in ("N","S","E","W")
-                       if _step_ctx.get(f"nb_{d}") is not None
-                       and family_of(_step_ctx[f"nb_{d}"]) == family_name) >= n
+                       if ctx.get(f"nb_{d}") is not None
+                       and family_of(ctx[f"nb_{d}"]) == family_name) >= n
         def __repr__(self): return f"nb_count_gte({family_name},{n})"
     return _C()
 
 # ── Actions ───────────────────────────────────────────────────────────────────
 
 class Action:
-    def apply(self, *_) -> None: pass
+    def apply(self, node: "Node", ctx: dict) -> None: pass
     def label(self) -> str: return "action"
 
 class Advance(Action):
     """Step mask forward in its current loop family (default)."""
-    def apply(self, node): node.mask = next_mask(node.mask)
+    def apply(self, node, ctx): node.mask = next_mask(node.mask)
     def label(self): return "ADVANCE"
 
 class Hold(Action):
     """Keep current mask unchanged."""
-    def apply(self, *_): pass
+    def apply(self, node, ctx): pass
     def label(self): return "HOLD"
 
 class GateOn(Action):
-    def apply(self, node): node.mask = 0b1111
+    def apply(self, node, ctx): node.mask = 0b1111
     def label(self): return "GATE_ON"
 
 class GateOff(Action):
-    def apply(self, node): node.mask = 0b0000
+    def apply(self, node, ctx): node.mask = 0b0000
     def label(self): return "GATE_OFF"
 
 class SwitchFamily(Action):
@@ -534,22 +564,22 @@ class SwitchFamily(Action):
     def __init__(self, family_name: str):
         self._name  = family_name
         self._first = self._FIRSTS[family_name]
-    def apply(self, node): node.mask = self._first
+    def apply(self, node, ctx): node.mask = self._first
     def label(self): return f"SWITCH({self._name})"
 
 class SetMask(Action):
     """Force a specific 4-bit mask value."""
     def __init__(self, mask: int): self._mask = mask
-    def apply(self, node): node.mask = self._mask
+    def apply(self, node, ctx): node.mask = self._mask
     def label(self): return f"SET({self._mask:04b})"
 
 class SwitchProgram(Action):
     """Advance mask AND signal an unconditional program switch for this cell.
     Grid.step() applies the switch after the full cell step completes."""
     def __init__(self, prog_name: str): self._prog_name = prog_name
-    def apply(self, node):
+    def apply(self, node, ctx):
         node.mask = next_mask(node.mask)
-        _pending_program_switch[0] = self._prog_name
+        ctx["_pending_switch"][0] = self._prog_name
     def label(self): return f"PROG({self._prog_name})"
 
 class SwitchToPluralityNeighbor(Action):
@@ -557,36 +587,36 @@ class SwitchToPluralityNeighbor(Action):
     appears at least `threshold` times among cardinal neighbors that differ
     from the cell's own program.  If no threshold is met, just advance."""
     def __init__(self, threshold: int = 2): self._threshold = threshold
-    def apply(self, node):
+    def apply(self, node, ctx):
         node.mask = next_mask(node.mask)
-        own = _step_ctx.get("own_prog")
+        own = ctx.get("own_prog")
         counts: dict = {}
         for d in ("N", "S", "E", "W"):
-            p = _step_ctx.get(f"nb_prog_{d}")
+            p = ctx.get(f"nb_prog_{d}")
             if p is not None and p != own:
                 counts[p] = counts.get(p, 0) + 1
         if not counts:
             return
         best, best_n = max(counts.items(), key=lambda kv: kv[1])
         if best_n >= self._threshold:
-            _pending_program_switch[0] = best
+            ctx["_pending_switch"][0] = best
     def label(self): return f"PLURALITY({self._threshold})"
 
 class CallProgram(Action):
     """Invoke a registered sub-program on this node for the current tick."""
     def __init__(self, name: str): self._name = name
-    def apply(self, node):
+    def apply(self, node, ctx):
         sub = PROGRAM_REGISTRY.get(self._name)
         if sub:
-            ctx = {k: v for k, v in _step_ctx.items() if k != "tick"} or None
-            sub.step_node(node, _step_ctx.get("tick", 0), ctx)
+            # Pass context down, ensuring tick is available
+            sub.step_node(node, ctx.get("tick", 0), ctx)
     def label(self): return f"CALL({self._name})"
 
 # ── Extended actions (Phase 2/3) ─────────────────────────────────────────────
 
 class RotateCW(Action):
     """Rotate mask bits clockwise: TL->TR->BR->BL->TL."""
-    def apply(self, node):
+    def apply(self, node, ctx):
         m = node.mask
         tl = (m >> 3) & 1; tr = (m >> 2) & 1
         br = (m >> 1) & 1; bl = m & 1
@@ -595,7 +625,7 @@ class RotateCW(Action):
 
 class RotateCCW(Action):
     """Rotate mask bits counter-clockwise: TL->BL->BR->TR->TL."""
-    def apply(self, node):
+    def apply(self, node, ctx):
         m = node.mask
         tl = (m >> 3) & 1; tr = (m >> 2) & 1
         br = (m >> 1) & 1; bl = m & 1
@@ -604,7 +634,7 @@ class RotateCCW(Action):
 
 class FlipH(Action):
     """Mirror mask horizontally: TL<->TR, BL<->BR."""
-    def apply(self, node):
+    def apply(self, node, ctx):
         m = node.mask
         tl = (m >> 3) & 1; tr = (m >> 2) & 1
         br = (m >> 1) & 1; bl = m & 1
@@ -613,7 +643,7 @@ class FlipH(Action):
 
 class FlipV(Action):
     """Mirror mask vertically: TL<->BL, TR<->BR."""
-    def apply(self, node):
+    def apply(self, node, ctx):
         m = node.mask
         tl = (m >> 3) & 1; tr = (m >> 2) & 1
         br = (m >> 1) & 1; bl = m & 1
@@ -621,43 +651,41 @@ class FlipV(Action):
     def label(self): return "FLIP_V"
 
 class SetVar(Action):
-    """Set a named cell variable to a value (stored in _step_ctx for grid pickup)."""
+    """Set a named cell variable to a value (stored in shared ctx['vars'])."""
     def __init__(self, name: str, value: int):
         self._name = name; self._value = value
-    def apply(self, node):
-        _step_ctx[f"var_{self._name}"] = self._value
+    def apply(self, node, ctx):
+        ctx["vars"][self._name] = self._value
     def label(self): return f"SET_VAR({self._name},{self._value})"
 
 class IncrVar(Action):
     """Increment a named cell variable by delta."""
     def __init__(self, name: str, delta: int = 1):
         self._name = name; self._delta = delta
-    def apply(self, node):
-        key = f"var_{self._name}"
-        _step_ctx[key] = _step_ctx.get(key, 0) + self._delta
+    def apply(self, node, ctx):
+        ctx["vars"][self._name] = ctx["vars"].get(self._name, 0) + self._delta
     def label(self): return f"INCR_VAR({self._name},{self._delta})"
 
 class Emit(Action):
     """Broadcast a named signal to cardinal neighbors (picked up next tick)."""
     def __init__(self, signal_name: str): self._signal = signal_name
-    def apply(self, node):
-        pending = _step_ctx.setdefault("pending_signals", set())
-        pending.add(self._signal)
+    def apply(self, node, ctx):
+        ctx["pending_signals"].add(self._signal)
     def label(self): return f"EMIT({self._signal})"
 
 class CompositeAction(Action):
     """Execute multiple actions in sequence."""
     def __init__(self, actions: List[Action]):
         self._actions = actions
-    def apply(self, node):
+    def apply(self, node, ctx):
         for a in self._actions:
-            a.apply(node)
+            a.apply(node, ctx)
     def label(self): return "+".join(a.label() for a in self._actions)
 
 class AdvanceN(Action):
     """Step mask forward N times in its loop family."""
     def __init__(self, n: int = 2): self._n = n
-    def apply(self, node):
+    def apply(self, node, ctx):
         for _ in range(self._n):
             node.mask = next_mask(node.mask)
     def label(self): return f"ADVANCE({self._n})"
@@ -681,11 +709,11 @@ class Rule:
     action:    Action
     name:      str = ""
 
-    def matches(self, node: "Node", tick: int) -> bool:
-        return self.condition.evaluate(node, tick)
+    def matches(self, node: "Node", tick: int, ctx: dict) -> bool:
+        return self.condition.evaluate(node, tick, ctx)
 
-    def fire(self, node: "Node") -> None:
-        self.action.apply(node)
+    def fire(self, node: "Node", ctx: dict) -> None:
+        self.action.apply(node, ctx)
 
 
 class Program:
@@ -696,7 +724,7 @@ class Program:
 
     Usage (replaces tick_masks):
         prog.step_tree(root, tick)
-        prog.step_tree(root, tick, ctx)  # with neighbor context for grid use
+        prog.step_tree(root, tick, ctx)
     """
     def __init__(self, rules: List[Rule], default: Action = None, name: str = ""):
         self.rules   = rules
@@ -704,29 +732,75 @@ class Program:
         self.name    = name
 
     def step_node(self, node: "Node", tick: int, ctx: dict = None) -> str:
-        """Apply first matching rule to one node. Sets _step_ctx. Returns rule name."""
-        global _step_ctx
-        _step_ctx = {"tick": tick}
-        if ctx:
-            _step_ctx.update(ctx)
+        """Apply first matching rule to one node. Returns rule name."""
+        if ctx is None: ctx = {}
+        ctx.setdefault("tick", tick)
+        # Ensure mutable output containers exist for standalone runs
+        ctx.setdefault("vars", {})
+        ctx.setdefault("pending_signals", set())
+        ctx.setdefault("_pending_switch", [None])
+        
         for rule in self.rules:
-            if rule.matches(node, tick):
-                rule.fire(node)
+            if rule.matches(node, tick, ctx):
+                rule.fire(node, ctx)
                 return rule.name or rule.action.label()
-        self.default.apply(node)
+        self.default.apply(node, ctx)
         return "."
 
     def step_tree(self, root: "Node", tick: int, ctx: dict = None) -> str:
         """Apply rules to every allocated node. Returns rule name fired at root."""
+        if ctx is None: ctx = {}
+        
+        def _get_child(n: Optional["Node"], idx: int) -> Optional["Node"]:
+            return n.children[idx] if (n and n.children) else None
+
         root_fired = ["."]
-        def _rec(n: "Node", is_root: bool = False) -> None:
-            fired = self.step_node(n, tick, ctx)
+        
+        def _rec(n: "Node", current_ctx: dict, is_root: bool = False) -> None:
+            # 1. Update neighbor mask values in context based on neighbor nodes
+            #    (This overrides the root-level masks passed from Grid for deep nodes)
+            if not is_root:
+                for d in ("N", "S", "E", "W"):
+                    nb_node = current_ctx.get(f"nb_node_{d}")
+                    if nb_node:
+                        current_ctx[f"nb_{d}"] = nb_node.mask
+                    else:
+                        current_ctx[f"nb_{d}"] = None
+                    # Clear neighbor program info for deep nodes
+                    current_ctx[f"nb_prog_{d}"] = None
+
+            # 2. Step this node
+            fired = self.step_node(n, tick, current_ctx)
             if is_root:
                 root_fired[0] = fired
+            
+            # 3. Recurse with updated neighbor contexts
             if n.children:
-                for c in n.children:
-                    _rec(c)
-        _rec(root, True)
+                nb_N = current_ctx.get("nb_node_N")
+                nb_S = current_ctx.get("nb_node_S")
+                nb_E = current_ctx.get("nb_node_E")
+                nb_W = current_ctx.get("nb_node_W")
+
+                def make_ctx(nn, ns, ne, nw):
+                    c = current_ctx.copy()
+                    c["nb_node_N"], c["nb_node_S"] = nn, ns
+                    c["nb_node_E"], c["nb_node_W"] = ne, nw
+                    return c
+
+                # TL(0): N=nb_N->BL(3), S=self->BL(3), E=self->TR(1), W=nb_W->TR(1)
+                _rec(n.children[0], make_ctx(_get_child(nb_N, 3), n.children[3], 
+                                             n.children[1], _get_child(nb_W, 1)))
+                # TR(1): N=nb_N->BR(2), S=self->BR(2), E=nb_E->TL(0), W=self->TL(0)
+                _rec(n.children[1], make_ctx(_get_child(nb_N, 2), n.children[2], 
+                                             _get_child(nb_E, 0), n.children[0]))
+                # BR(2): N=self->TR(1), S=nb_S->TR(1), E=nb_E->BL(3), W=self->BL(3)
+                _rec(n.children[2], make_ctx(n.children[1], _get_child(nb_S, 1), 
+                                             _get_child(nb_E, 3), n.children[3]))
+                # BL(3): N=self->TL(0), S=nb_S->TL(0), E=self->BR(2), W=nb_W->BR(2)
+                _rec(n.children[3], make_ctx(n.children[0], _get_child(nb_S, 0), 
+                                             n.children[2], _get_child(nb_W, 2)))
+
+        _rec(root, ctx, True)
         return root_fired[0]
 
 # ── Built-in example programs ─────────────────────────────────────────────────
@@ -855,33 +929,56 @@ class Grid:
                 if r > 0:             received |= snap_sigs[r - 1][c]
                 if c + 1 < self.cols: received |= snap_sigs[r][c + 1]
                 if c > 0:             received |= snap_sigs[r][c - 1]
+                
+                # Cardinal neighbors
+                nb_N = snap_masks[r + 1][c] if r + 1 < self.rows else None
+                nb_S = snap_masks[r - 1][c] if r > 0             else None
+                nb_E = snap_masks[r][c + 1] if c + 1 < self.cols else None
+                nb_W = snap_masks[r][c - 1] if c > 0             else None
+                
+                # Diagonal neighbors (for Conway's Game of Life and similar)
+                nb_NE = snap_masks[r - 1][c + 1] if r > 0 and c + 1 < self.cols     else None
+                nb_NW = snap_masks[r - 1][c - 1] if r > 0 and c > 0                 else None
+                nb_SE = snap_masks[r + 1][c + 1] if r + 1 < self.rows and c + 1 < self.cols else None
+                nb_SW = snap_masks[r + 1][c - 1] if r + 1 < self.rows and c > 0     else None
+                
                 nb = {
-                    "nb_N":      snap_masks[r + 1][c] if r + 1 < self.rows else None,
-                    "nb_S":      snap_masks[r - 1][c] if r > 0             else None,
-                    "nb_E":      snap_masks[r][c + 1] if c + 1 < self.cols else None,
-                    "nb_W":      snap_masks[r][c - 1] if c > 0             else None,
+                    "nb_N":      nb_N,
+                    "nb_S":      nb_S,
+                    "nb_E":      nb_E,
+                    "nb_W":      nb_W,
+                    "nb_NE":     nb_NE,
+                    "nb_NW":     nb_NW,
+                    "nb_SE":     nb_SE,
+                    "nb_SW":     nb_SW,
                     "nb_prog_N": snap_progs[r + 1][c] if r + 1 < self.rows else None,
                     "nb_prog_S": snap_progs[r - 1][c] if r > 0             else None,
                     "nb_prog_E": snap_progs[r][c + 1] if c + 1 < self.cols else None,
                     "nb_prog_W": snap_progs[r][c - 1] if c > 0             else None,
                     "own_prog":  snap_progs[r][c],
+                    "nb_node_N": self.cells[r + 1][c] if r + 1 < self.rows else None,
+                    "nb_node_S": self.cells[r - 1][c] if r > 0             else None,
+                    "nb_node_E": self.cells[r][c + 1] if c + 1 < self.cols else None,
+                    "nb_node_W": self.cells[r][c - 1] if c > 0             else None,
                     "signals":   received,
+                    # Mutable containers shared down the tree:
+                    "vars":            {k: v for k, v in snap_vars[r][c].items()
+                                        if not k.startswith("_")},
+                    "pending_signals": set(),
+                    "_pending_switch": [None],
                 }
-                # Inject cell variables into context.
-                for k, v in snap_vars[r][c].items():
-                    if not k.startswith("_"):
-                        nb[f"var_{k}"] = v
-                _pending_program_switch[0] = None
+                
                 self.programs[r][c].step_tree(self.cells[r][c], tick, nb)
+
                 # Collect variable writes back to node.
-                for k, v in _step_ctx.items():
-                    if k.startswith("var_"):
-                        self.cells[r][c].vars[k[4:]] = v
+                for k, v in nb["vars"].items():
+                    self.cells[r][c].vars[k] = v
+
                 # Collect emitted signals.
-                if _step_ctx.get("pending_signals"):
-                    emitted_signals[(r, c)] = set(_step_ctx["pending_signals"])
-                if _pending_program_switch[0] is not None:
-                    new_prog = PROGRAM_REGISTRY.get(_pending_program_switch[0])
+                if nb["pending_signals"]:
+                    emitted_signals[(r, c)] = set(nb["pending_signals"])
+                if nb["_pending_switch"][0] is not None:
+                    new_prog = PROGRAM_REGISTRY.get(nb["_pending_switch"][0])
                     if new_prog is not None:
                         switches[(r, c)] = new_prog
         # Apply all program switches together (post-step, snapshot semantics).
@@ -905,6 +1002,9 @@ def draw_grid_frame(ax, grid: Grid, max_depth: int,
     ax.set_aspect("equal")
     ax.set_xticks([]); ax.set_yticks([])
     ax.set_facecolor("#111111")
+    
+    rects = []
+    colors = []
     cs = grid.cell_size
     for r in range(grid.rows):
         for c in range(grid.cols):
@@ -914,10 +1014,14 @@ def draw_grid_frame(ax, grid: Grid, max_depth: int,
                 zc = zone_palette.get(grid.programs[r][c].name, (0.15, 0.15, 0.15))
                 ax.add_patch(Rectangle((root.x, root.y), cs, cs,
                                        facecolor=(*zc, 0.18), linewidth=0))
+            
             for (x, y, s, d, m) in expand_active(root, max_depth):
-                ax.add_patch(Rectangle((x, y), s, s,
-                                       facecolor=_cell_color(m, d, max_depth),
-                                       linewidth=0))
+                rects.append(Rectangle((x, y), s, s))
+                colors.append(_cell_color(m, d, max_depth))
+
+    if rects:
+        ax.add_collection(PatchCollection(rects, facecolors=colors, linewidth=0))
+
     for i in range(grid.rows + 1):
         ax.axhline(i * cs, color="#2a2a2a", linewidth=0.5)
     for j in range(grid.cols + 1):
@@ -1427,10 +1531,38 @@ def _parse_atom(tokens: List[str]) -> Cond:
         fam, n = raw.rsplit(":", 1)
         return IF_neighbor_count_gte(fam, int(n))
 
+    if lo.startswith("nb_count8="):
+        raw = tok.split("=", 1)[1]
+        fam, n = raw.rsplit(":", 1)
+        return IF_neighbor_count8(fam, int(n))
+
     if lo.startswith("nb_count="):
         raw = tok.split("=", 1)[1]
         fam, n = raw.rsplit(":", 1)
         return IF_neighbor_count(fam, int(n))
+
+    if lo.startswith("nb_mask_count8="):
+        raw = tok.split("=", 1)[1]
+        mask_hex, n = raw.rsplit(":", 1)
+        if mask_hex.startswith("0b"):
+            mask_value = int(mask_hex, 2)
+        elif mask_hex.startswith("0x"):
+            mask_value = int(mask_hex, 16)
+        else:
+            mask_value = int(mask_hex, 2)
+        return IF_neighbor_mask_count8(mask_value, int(n))
+
+    if lo.startswith("nb_mask_count="):
+        raw = tok.split("=", 1)[1]
+        mask_hex, n = raw.rsplit(":", 1)
+        # Parse mask value (supports binary like 1111 or hex like 0xF)
+        if mask_hex.startswith("0b"):
+            mask_value = int(mask_hex, 2)
+        elif mask_hex.startswith("0x"):
+            mask_value = int(mask_hex, 16)
+        else:
+            mask_value = int(mask_hex, 2)  # Default to binary
+        return IF_neighbor_mask_count(mask_value, int(n))
 
     if lo.startswith("nb_any="):
         return IF_any_neighbor(tok.split("=", 1)[1])
@@ -1816,6 +1948,53 @@ def run_script_demo(script: str = GEO_SPIRAL,
     plt.tight_layout(); plt.show()
 
 
+def run_script_grid_demo(script: str, rows: int = 8, cols: int = 8,
+                         start_mask: int = 0b1000,
+                         ticks_per_second: float = 3.0,
+                         max_depth: int = 3,
+                         random_seed: bool = False) -> None:
+    """Parse a .geo script and run it on a Grid so neighbor conditions work."""
+    import random as _rng
+    
+    # Larger cell size for better visibility
+    cell_size = 16.0
+    
+    prog = parse_geo_script(script)
+    if random_seed:
+        dead = 0b0000
+        alive = start_mask
+        grid = Grid.make(rows, cols, prog,
+                         init_mask_fn=lambda r, c: alive if _rng.random() < 0.4 else dead,
+                         cell_size=cell_size)
+    else:
+        # Check if this is Conway's Life - use random seeding automatically
+        if prog.name and "conway" in prog.name.lower():
+            dead = 0b0000
+            alive = 0b1111  # Use GATE_ON for visible white cells
+            grid = Grid.make(rows, cols, prog,
+                             init_mask_fn=lambda r, c: alive if _rng.random() < 0.35 else dead,
+                             cell_size=cell_size)
+        else:
+            grid = Grid.make(rows, cols, prog,
+                             init_mask_fn=lambda r, c: start_mask,
+                             cell_size=cell_size)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    fig.patch.set_facecolor("#0d0d0d")
+    tick = [0]
+
+    def update(_):
+        grid.step(tick[0])
+        tick[0] += 1
+        draw_grid_frame(ax, grid, max_depth)
+        ax.set_title(f"{prog.name}  {rows}x{cols} grid  t={tick[0]}",
+                     fontsize=10, color="white")
+
+    fig._anim = FuncAnimation(fig, update,
+                               interval=int(1000 / max(ticks_per_second, 0.001)),
+                               cache_frame_data=False)
+    plt.tight_layout(); plt.show()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
@@ -1875,6 +2054,8 @@ examples:
                         help="run loop-family reference lab (2x3 panel)")
     parser.add_argument("--grammar", action="store_true",
                         help="run grammar rule comparison (2x2 panel)")
+    parser.add_argument("--random-seed", action="store_true",
+                        help="randomly seed alive/dead cells on grid (for Life etc.)")
 
     args = parser.parse_args()
     start_mask = int(args.mask, 2)
@@ -1890,12 +2071,27 @@ examples:
     elif args.geo:
         with open(args.geo, "r") as f:
             script_text = f.read()
-        run_script_demo(script_text, start_mask=start_mask,
-                        ticks_per_second=args.speed, max_depth=args.depth)
+        # Auto-detect grid mode for simulations that need neighbor interactions
+        use_grid = args.grid or any(kw in args.geo.lower() for kw in ['conway', 'dungeon', 'ecosystem', 'nb_', 'heat_', 'signal_', 'forest_fire'])
+        if use_grid:
+            run_script_grid_demo(script_text, start_mask=start_mask,
+                                 ticks_per_second=args.speed,
+                                 max_depth=min(args.depth, 4),
+                                 random_seed=args.random_seed)
+        else:
+            run_script_demo(script_text, start_mask=start_mask,
+                            ticks_per_second=args.speed, max_depth=args.depth)
 
     elif args.demo:
-        run_script_demo(DEMOS[args.demo], start_mask=start_mask,
-                        ticks_per_second=args.speed, max_depth=args.depth)
+        script_text = DEMOS[args.demo]
+        if args.grid:
+            run_script_grid_demo(script_text, start_mask=start_mask,
+                                 ticks_per_second=args.speed,
+                                 max_depth=min(args.depth, 4),
+                                 random_seed=args.random_seed)
+        else:
+            run_script_demo(script_text, start_mask=start_mask,
+                            ticks_per_second=args.speed, max_depth=args.depth)
 
     elif args.grid:
         run_grid_demo(rows=8, cols=8, ticks_per_second=args.speed,
